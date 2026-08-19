@@ -43,25 +43,22 @@ function verifyVapiSecret(req, res, next) {
   const expectedSecret = process.env.VAPI_WEBHOOK_SECRET;
   const incomingHeader = req.headers['x-vapi-secret'];
 
-  console.log('--- Auth check ---');
+  console.log('----------------------------------------');
+  console.log('VAPI AUTH CHECK');
   console.log('Route:', req.path);
-
-  // DO NOT log the actual secret.
   console.log(
-    'Incoming header present:',
-    Boolean(incomingHeader)
+    'Incoming secret:',
+    JSON.stringify(incomingHeader)
+  );
+  console.log(
+    'Expected secret:',
+    JSON.stringify(expectedSecret)
   );
 
-  console.log(
-    'Expected secret configured:',
-    Boolean(expectedSecret)
-  );
-
-  // If no secret is configured on Render,
-  // allow the request.
+  // Allow requests if no secret is configured.
   if (!expectedSecret) {
     console.log(
-      'WARNING: VAPI_WEBHOOK_SECRET is not configured. Authentication skipped.'
+      'No VAPI_WEBHOOK_SECRET configured - skipping auth.'
     );
 
     return next();
@@ -69,17 +66,12 @@ function verifyVapiSecret(req, res, next) {
 
   let incomingValues = [];
 
-  // Node can provide a header as an array.
   if (Array.isArray(incomingHeader)) {
     incomingValues = incomingHeader;
-  }
-
-  // Normally Node provides it as a string.
-  else if (typeof incomingHeader === 'string') {
+  } else if (typeof incomingHeader === 'string') {
     incomingValues = incomingHeader.split(',');
   }
 
-  // Clean up the values.
   incomingValues = incomingValues
     .map(function (value) {
       return String(value).trim();
@@ -88,97 +80,148 @@ function verifyVapiSecret(req, res, next) {
       return value.length > 0;
     });
 
-  console.log(
-    'Number of normalized secret values:',
-    incomingValues.length
-  );
-
-  // IMPORTANT:
-  // Render previously showed:
-  //
-  // Incoming secret: ", mysecret123"
-  //
-  // After split(',') this becomes:
-  //
-  // ["", " mysecret123"]
-  //
-  // After trim/filter it becomes:
-  //
-  // ["mysecret123"]
-  //
-  // Therefore this handles that situation correctly.
-
-  const secretMatched =
-    incomingValues.length === 1 &&
-    incomingValues[0] === expectedSecret.trim();
-
-  if (!secretMatched) {
-    console.log(
-      'MISMATCH - rejecting request with 401.'
-    );
+  if (
+    incomingValues.length !== 1 ||
+    incomingValues[0] !== expectedSecret
+  ) {
+    console.log('AUTH FAILED');
 
     return res.status(401).json({
       error: 'Unauthorized'
     });
   }
 
-  console.log(
-    'Secret matched - proceeding.'
-  );
+  console.log('AUTH SUCCESS');
 
   next();
 }
 
 // ---------------------------------------------------------------------
-// SAFELY READ VAPI FUNCTION ARGUMENTS
+// GET VAPI TOOL CALL
+// Supports current Vapi format + older format
+// ---------------------------------------------------------------------
+
+function getToolCall(req) {
+  const message = req.body && req.body.message;
+
+  if (!message) {
+    return null;
+  }
+
+  // Current Vapi format
+  if (
+    Array.isArray(message.toolCallList) &&
+    message.toolCallList.length > 0
+  ) {
+    return message.toolCallList[0];
+  }
+
+  // Older/alternate format
+  if (
+    Array.isArray(message.toolCalls) &&
+    message.toolCalls.length > 0
+  ) {
+    return message.toolCalls[0];
+  }
+
+  return null;
+}
+
+// ---------------------------------------------------------------------
+// GET TOOL ARGUMENTS
+// Supports current Vapi format + older format
 // ---------------------------------------------------------------------
 
 function getToolArguments(toolCall) {
-  const rawArguments =
-    toolCall &&
-    toolCall.function &&
-    toolCall.function.arguments;
-
-  if (!rawArguments) {
+  if (!toolCall) {
     return {};
   }
 
-  // Some Vapi requests can provide arguments as an object.
-  if (typeof rawArguments === 'object') {
-    return rawArguments;
+  // ---------------------------------------------------------------
+  // Current Vapi format:
+  //
+  // {
+  //   "id": "...",
+  //   "name": "lookup_order",
+  //   "arguments": {
+  //      "order_number": "12345"
+  //   }
+  // }
+  // ---------------------------------------------------------------
+
+  if (toolCall.arguments) {
+    if (typeof toolCall.arguments === 'object') {
+      return toolCall.arguments;
+    }
+
+    if (typeof toolCall.arguments === 'string') {
+      try {
+        return JSON.parse(toolCall.arguments);
+      } catch (error) {
+        console.log(
+          'Could not parse toolCall.arguments:',
+          toolCall.arguments
+        );
+
+        return {};
+      }
+    }
   }
 
-  // Some Vapi requests provide arguments as JSON text.
-  if (typeof rawArguments === 'string') {
-    try {
-      return JSON.parse(rawArguments);
-    } catch (error) {
-      console.log(
-        'Could not parse tool arguments.'
-      );
+  // ---------------------------------------------------------------
+  // Alternate format:
+  //
+  // function.arguments
+  // ---------------------------------------------------------------
 
-      return {};
+  if (
+    toolCall.function &&
+    toolCall.function.arguments
+  ) {
+    const rawArguments = toolCall.function.arguments;
+
+    if (typeof rawArguments === 'object') {
+      return rawArguments;
+    }
+
+    if (typeof rawArguments === 'string') {
+      try {
+        return JSON.parse(rawArguments);
+      } catch (error) {
+        console.log(
+          'Could not parse function.arguments:',
+          rawArguments
+        );
+
+        return {};
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Some Vapi payloads may use parameters
+  // ---------------------------------------------------------------
+
+  if (toolCall.parameters) {
+    if (typeof toolCall.parameters === 'object') {
+      return toolCall.parameters;
+    }
+
+    if (typeof toolCall.parameters === 'string') {
+      try {
+        return JSON.parse(toolCall.parameters);
+      } catch (error) {
+        console.log(
+          'Could not parse toolCall.parameters:',
+          toolCall.parameters
+        );
+
+        return {};
+      }
     }
   }
 
   return {};
-}
-
-// ---------------------------------------------------------------------
-// GET FIRST VAPI TOOL CALL
-// ---------------------------------------------------------------------
-
-function getToolCall(req) {
-  const toolCalls =
-    req.body &&
-    req.body.message &&
-    req.body.message.toolCalls;
-
-  if (!Array.isArray(toolCalls)) {
-    return null;
-  }
-
-  return toolCalls[0] || null;
 }
 
 // ---------------------------------------------------------------------
@@ -190,7 +233,7 @@ function toolResponse(toolCallId, resultText) {
     results: [
       {
         toolCallId: toolCallId,
-        result: resultText
+        result: String(resultText)
       }
     ]
   };
@@ -204,36 +247,48 @@ app.post(
   '/api/vapi/lookup-order',
   verifyVapiSecret,
   function (req, res) {
+    console.log('');
+    console.log('========================================');
+    console.log('LOOKUP ORDER REQUEST');
+    console.log('========================================');
+
     console.log(
-      'lookup_order request received.'
+      'Full request body:',
+      JSON.stringify(req.body, null, 2)
     );
 
     const toolCall = getToolCall(req);
 
     if (!toolCall) {
-      console.log(
-        'No tool call found in request body.'
-      );
+      console.log('ERROR: No tool call found.');
 
       return res.status(400).json({
         error: 'No tool call found'
       });
     }
 
-    const args = getToolArguments(toolCall);
-
-    const orderNumber =
-      args.order_number != null
-        ? String(args.order_number).trim()
-        : '';
-
     console.log(
-      'Order number:',
-      orderNumber
+      'Tool call:',
+      JSON.stringify(toolCall, null, 2)
     );
 
-    const order =
-      MOCK_ORDERS[orderNumber];
+    const args = getToolArguments(toolCall);
+
+    console.log(
+      'Parsed arguments:',
+      JSON.stringify(args, null, 2)
+    );
+
+    const orderNumber = String(
+      args.order_number || ''
+    ).trim();
+
+    console.log(
+      'ORDER NUMBER RECEIVED:',
+      JSON.stringify(orderNumber)
+    );
+
+    const order = MOCK_ORDERS[orderNumber];
 
     let resultText;
 
@@ -248,16 +303,27 @@ app.post(
         ', containing ' +
         order.items +
         '.';
+
+      console.log(
+        'ORDER FOUND:',
+        JSON.stringify(order, null, 2)
+      );
     } else {
       resultText =
         "I couldn't find an order with that number. Could you double check it?";
+
+      console.log(
+        'ORDER NOT FOUND:',
+        JSON.stringify(orderNumber)
+      );
     }
 
     console.log(
-      'lookup_order completed.'
+      'RESULT SENT TO VAPI:',
+      resultText
     );
 
-    return res.json(
+    return res.status(200).json(
       toolResponse(
         toolCall.id,
         resultText
@@ -274,17 +340,19 @@ app.post(
   '/api/vapi/lookup-account',
   verifyVapiSecret,
   function (req, res) {
+    console.log('');
+    console.log('========================================');
+    console.log('LOOKUP ACCOUNT REQUEST');
+    console.log('========================================');
+
     console.log(
-      'lookup_account request received.'
+      'Full request body:',
+      JSON.stringify(req.body, null, 2)
     );
 
     const toolCall = getToolCall(req);
 
     if (!toolCall) {
-      console.log(
-        'No tool call found in request body.'
-      );
-
       return res.status(400).json({
         error: 'No tool call found'
       });
@@ -292,19 +360,16 @@ app.post(
 
     const args = getToolArguments(toolCall);
 
-    const phoneOrEmail =
-      args.phone_or_email != null
-        ? String(args.phone_or_email)
-            .trim()
-            .toLowerCase()
-        : '';
-
     console.log(
-      'Account lookup requested.'
+      'Parsed account arguments:',
+      JSON.stringify(args, null, 2)
     );
 
-    const account =
-      MOCK_ACCOUNTS[phoneOrEmail];
+    const phoneOrEmail = String(
+      args.phone_or_email || ''
+    ).trim();
+
+    const account = MOCK_ACCOUNTS[phoneOrEmail];
 
     let resultText;
 
@@ -323,10 +388,11 @@ app.post(
     }
 
     console.log(
-      'lookup_account completed.'
+      'ACCOUNT RESULT:',
+      resultText
     );
 
-    return res.json(
+    return res.status(200).json(
       toolResponse(
         toolCall.id,
         resultText
@@ -343,17 +409,19 @@ app.post(
   '/api/vapi/create-ticket',
   verifyVapiSecret,
   function (req, res) {
+    console.log('');
+    console.log('========================================');
+    console.log('CREATE SUPPORT TICKET REQUEST');
+    console.log('========================================');
+
     console.log(
-      'create_support_ticket request received.'
+      'Full request body:',
+      JSON.stringify(req.body, null, 2)
     );
 
     const toolCall = getToolCall(req);
 
     if (!toolCall) {
-      console.log(
-        'No tool call found in request body.'
-      );
-
       return res.status(400).json({
         error: 'No tool call found'
       });
@@ -362,18 +430,17 @@ app.post(
     const args = getToolArguments(toolCall);
 
     console.log(
-      'New support ticket received.'
+      'NEW TICKET:',
+      JSON.stringify(args, null, 2)
     );
 
-    console.log(
-      'Ticket fields:',
-      Object.keys(args)
-    );
+    const resultText =
+      "Got it, I've logged a ticket about that and someone will follow up.";
 
-    return res.json(
+    return res.status(200).json(
       toolResponse(
         toolCall.id,
-        "Got it, I've logged a ticket about that and someone will follow up."
+        resultText
       )
     );
   }
@@ -392,7 +459,7 @@ app.post(
       req.body.message;
 
     console.log(
-      'Call event:',
+      'CALL EVENT:',
       event && event.type
     );
 
@@ -404,37 +471,19 @@ app.post(
 // HEALTH CHECK
 // ---------------------------------------------------------------------
 
-app.get(
-  '/',
-  function (req, res) {
-    res.status(200).send(
-      'Voice agent backend is running.'
-    );
-  }
-);
-
-// Additional health endpoint.
-app.get(
-  '/health',
-  function (req, res) {
-    res.status(200).json({
-      status: 'ok',
-      service: 'voice-agent-backend'
-    });
-  }
-);
+app.get('/', function (req, res) {
+  res.send(
+    'Voice agent backend is running.'
+  );
+});
 
 // ---------------------------------------------------------------------
 // START SERVER
 // ---------------------------------------------------------------------
 
-app.listen(
-  PORT,
-  '0.0.0.0',
-  function () {
-    console.log(
-      'Voice agent backend listening on port ' +
-      PORT
-    );
-  }
-);
+app.listen(PORT, function () {
+  console.log(
+    'Voice agent backend listening on port ' +
+    PORT
+  );
+});

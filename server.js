@@ -7,8 +7,6 @@ const PORT = process.env.PORT || 3000;
 
 // ---------------------------------------------------------------------
 // TEMPORARY MOCK DATA
-// Replace these two objects with real calls to your DB / Shopify / CRM
-// once the basic flow is working end to end.
 // ---------------------------------------------------------------------
 const MOCK_ORDERS = {
   '12345': { number: '12345', status: 'shipped', eta: 'tomorrow', items: '2 items' },
@@ -21,24 +19,28 @@ const MOCK_ACCOUNTS = {
 
 // ---------------------------------------------------------------------
 // Simple security check.
-// Vapi sends a secret header you configure in the Vapi dashboard
-// (Tools > your tool > Authorization > Custom Credential).
-// This rejects any request that doesn't have it.
 // ---------------------------------------------------------------------
 function verifyVapiSecret(req, res, next) {
   const incomingSecret = req.headers['x-vapi-secret'];
+
+  // TEMP DEBUG LOGGING — remove once the auth issue is confirmed fixed.
+  console.log('--- Auth check ---');
+  console.log('Route:', req.path);
+  console.log('Incoming secret:', JSON.stringify(incomingSecret));
+  console.log('Expected secret:', JSON.stringify(process.env.VAPI_WEBHOOK_SECRET));
+
   if (!process.env.VAPI_WEBHOOK_SECRET) {
-    // No secret configured yet (fine for local testing) — skip check.
+    console.log('No VAPI_WEBHOOK_SECRET set on server — skipping check.');
     return next();
   }
   if (incomingSecret !== process.env.VAPI_WEBHOOK_SECRET) {
+    console.log('MISMATCH — rejecting request with 401.');
     return res.status(401).json({ error: 'Unauthorized' });
   }
+  console.log('Secret matched — proceeding.');
   next();
 }
 
-// Helper: every Vapi tool-call response must be shaped like this,
-// matched to the toolCallId Vapi sent.
 function toolResponse(toolCallId, resultText) {
   return { results: [{ toolCallId, result: resultText }] };
 }
@@ -80,25 +82,21 @@ app.post('/api/vapi/create-ticket', verifyVapiSecret, (req, res) => {
   const toolCall = req.body.message.toolCalls[0];
   const args = toolCall.function.arguments;
 
-  // TODO: replace with a real call to Zendesk/Freshdesk/your ticketing system
   console.log('New ticket:', args);
 
   res.json(toolResponse(toolCall.id, `Got it, I've logged a ticket about that and someone will follow up.`));
 });
 
 // ---------------------------------------------------------------------
-// CALL EVENTS webhook — Vapi sends call lifecycle events here
-// (call started, transcript updates, call ended, etc). Useful for
-// logging transcripts and building your pitch metrics later.
+// CALL EVENTS webhook
 // ---------------------------------------------------------------------
 app.post('/api/vapi/call-events', verifyVapiSecret, (req, res) => {
   const event = req.body.message;
   console.log('Call event:', event?.type);
-  // TODO: write event to your own database for analytics
   res.sendStatus(200);
 });
 
-// Health check — visit this URL in a browser to confirm the server is up
+// Health check
 app.get('/', (req, res) => {
   res.send('Voice agent backend is running.');
 });

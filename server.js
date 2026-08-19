@@ -1,5 +1,4 @@
 require('dotenv').config();
-
 const express = require('express');
 const app = express();
 
@@ -322,4 +321,3 @@ app.listen(PORT, function () {
     'Voice agent backend listening on port ' + PORT
   );
 });
-```

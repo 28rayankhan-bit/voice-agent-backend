@@ -1,4 +1,4 @@
-require('dotenv').config();
+rrequire('dotenv').config();
 
 const express = require('express');
 const app = express();
@@ -8,32 +8,86 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
 // ---------------------------------------------------------------------
-// TEMPORARY MOCK DATA
+// NOVA MOCK DATA
+// Replace this later with Nova's real API integration.
 // ---------------------------------------------------------------------
 
-const MOCK_ORDERS = {
-  '12345': {
-    number: '12345',
-    status: 'shipped',
-    eta: 'tomorrow',
-    items: '2 items'
+const MOCK_NOVA_CUSTOMERS = {
+  '03001234567': {
+    customer_id: 'NOVA-1001',
+    name: 'Ahmed Khan',
+    phone: '03001234567',
+    address: 'House 123, Islamabad',
+    customer_since: '2005',
+
+    cable: {
+      status: 'active',
+      package: 'Nova Cable Basic'
+    },
+
+    internet: {
+      status: 'not_subscribed'
+    },
+
+    current_bill: {
+      amount: 2150,
+      currency: 'PKR',
+      due_date: '2026-08-25'
+    },
+
+    complaints: []
   },
 
-  '67890': {
-    number: '67890',
-    status: 'processing',
-    eta: 'in 3 days',
-    items: '1 item'
+  '03007654321': {
+    customer_id: 'NOVA-1002',
+    name: 'Usman Ali',
+    phone: '03007654321',
+    address: 'Street 10, Islamabad',
+    customer_since: '2021',
+
+    cable: {
+      status: 'active',
+      package: 'Nova Cable Premium'
+    },
+
+    internet: {
+      status: 'active',
+      package: 'Nova Internet 20 Mbps'
+    },
+
+    current_bill: {
+      amount: 3200,
+      currency: 'PKR',
+      due_date: '2026-08-28'
+    },
+
+    complaints: [
+      {
+        complaint_id: 'CMP-10001',
+        status: 'open',
+        subject: 'Internet speed issue'
+      }
+    ]
   }
 };
 
-const MOCK_ACCOUNTS = {
-  'jane@example.com': {
-    name: 'Jane Doe',
-    plan: 'Pro',
-    status: 'active'
+// ---------------------------------------------------------------------
+// MOCK SERVICE AVAILABILITY
+// ---------------------------------------------------------------------
+
+const MOCK_SERVICE_AREA = {
+  'House 123, Islamabad': {
+    internet_available: true,
+    cable_available: true
+  },
+
+  'Street 10, Islamabad': {
+    internet_available: true,
+    cable_available: true
   }
 };
+
+const MOCK_COMPLAINTS = [];
 
 // ---------------------------------------------------------------------
 // VAPI AUTHENTICATION
@@ -43,22 +97,9 @@ function verifyVapiSecret(req, res, next) {
   const expectedSecret = process.env.VAPI_WEBHOOK_SECRET;
   const incomingHeader = req.headers['x-vapi-secret'];
 
-  console.log('----------------------------------------');
-  console.log('VAPI AUTH CHECK');
-  console.log('Route:', req.path);
-  console.log(
-    'Incoming secret:',
-    JSON.stringify(incomingHeader)
-  );
-  console.log(
-    'Expected secret:',
-    JSON.stringify(expectedSecret)
-  );
-
-  // Allow requests if no secret is configured.
   if (!expectedSecret) {
-    console.log(
-      'No VAPI_WEBHOOK_SECRET configured - skipping auth.'
+    console.warn(
+      'WARNING: VAPI_WEBHOOK_SECRET is not configured.'
     );
 
     return next();
@@ -73,32 +114,23 @@ function verifyVapiSecret(req, res, next) {
   }
 
   incomingValues = incomingValues
-    .map(function (value) {
-      return String(value).trim();
-    })
-    .filter(function (value) {
-      return value.length > 0;
-    });
+    .map(value => String(value).trim())
+    .filter(value => value.length > 0);
 
   if (
     incomingValues.length !== 1 ||
     incomingValues[0] !== expectedSecret
   ) {
-    console.log('AUTH FAILED');
-
     return res.status(401).json({
       error: 'Unauthorized'
     });
   }
 
-  console.log('AUTH SUCCESS');
-
   next();
 }
 
 // ---------------------------------------------------------------------
-// GET VAPI TOOL CALL
-// Supports current Vapi format + older format
+// VAPI TOOL HELPERS
 // ---------------------------------------------------------------------
 
 function getToolCall(req) {
@@ -108,7 +140,6 @@ function getToolCall(req) {
     return null;
   }
 
-  // Current Vapi format
   if (
     Array.isArray(message.toolCallList) &&
     message.toolCallList.length > 0
@@ -116,7 +147,6 @@ function getToolCall(req) {
     return message.toolCallList[0];
   }
 
-  // Older/alternate format
   if (
     Array.isArray(message.toolCalls) &&
     message.toolCalls.length > 0
@@ -127,96 +157,28 @@ function getToolCall(req) {
   return null;
 }
 
-// ---------------------------------------------------------------------
-// GET TOOL ARGUMENTS
-// Supports current Vapi format + older format
-// ---------------------------------------------------------------------
-
 function getToolArguments(toolCall) {
   if (!toolCall) {
     return {};
   }
 
-  // ---------------------------------------------------------------
-  // Current Vapi format:
-  //
-  // {
-  //   "id": "...",
-  //   "name": "lookup_order",
-  //   "arguments": {
-  //      "order_number": "12345"
-  //   }
-  // }
-  // ---------------------------------------------------------------
-
-  if (toolCall.arguments) {
-    if (typeof toolCall.arguments === 'object') {
-      return toolCall.arguments;
-    }
-
-    if (typeof toolCall.arguments === 'string') {
-      try {
-        return JSON.parse(toolCall.arguments);
-      } catch (error) {
-        console.log(
-          'Could not parse toolCall.arguments:',
-          toolCall.arguments
-        );
-
-        return {};
-      }
-    }
-  }
-
-  // ---------------------------------------------------------------
-  // Alternate format:
-  //
-  // function.arguments
-  // ---------------------------------------------------------------
-
-  if (
+  const possibleArguments = [
+    toolCall.arguments,
     toolCall.function &&
-    toolCall.function.arguments
-  ) {
-    const rawArguments = toolCall.function.arguments;
+      toolCall.function.arguments,
+    toolCall.parameters
+  ];
 
-    if (typeof rawArguments === 'object') {
-      return rawArguments;
+  for (const raw of possibleArguments) {
+    if (raw && typeof raw === 'object') {
+      return raw;
     }
 
-    if (typeof rawArguments === 'string') {
+    if (typeof raw === 'string') {
       try {
-        return JSON.parse(rawArguments);
+        return JSON.parse(raw);
       } catch (error) {
-        console.log(
-          'Could not parse function.arguments:',
-          rawArguments
-        );
-
-        return {};
-      }
-    }
-  }
-
-  // ---------------------------------------------------------------
-  // Some Vapi payloads may use parameters
-  // ---------------------------------------------------------------
-
-  if (toolCall.parameters) {
-    if (typeof toolCall.parameters === 'object') {
-      return toolCall.parameters;
-    }
-
-    if (typeof toolCall.parameters === 'string') {
-      try {
-        return JSON.parse(toolCall.parameters);
-      } catch (error) {
-        console.log(
-          'Could not parse toolCall.parameters:',
-          toolCall.parameters
-        );
-
-        return {};
+        // Try next format.
       }
     }
   }
@@ -224,15 +186,11 @@ function getToolArguments(toolCall) {
   return {};
 }
 
-// ---------------------------------------------------------------------
-// STANDARD VAPI TOOL RESPONSE
-// ---------------------------------------------------------------------
-
 function toolResponse(toolCallId, resultText) {
   return {
     results: [
       {
-        toolCallId: toolCallId,
+        toolCallId,
         result: String(resultText)
       }
     ]
@@ -240,88 +198,90 @@ function toolResponse(toolCallId, resultText) {
 }
 
 // ---------------------------------------------------------------------
-// TOOL 1: LOOKUP ORDER
+// PHONE NORMALIZATION
+// ---------------------------------------------------------------------
+
+function normalizePhone(phone) {
+  return String(phone || '')
+    .replace(/[^\d+]/g, '')
+    .trim();
+}
+
+// ---------------------------------------------------------------------
+// FIND CUSTOMER
+// ---------------------------------------------------------------------
+
+function getCustomerByPhone(phone) {
+  const normalized = normalizePhone(phone);
+
+  return MOCK_NOVA_CUSTOMERS[normalized] || null;
+}
+
+// ---------------------------------------------------------------------
+// TOOL 1: LOOKUP CUSTOMER
 // ---------------------------------------------------------------------
 
 app.post(
-  '/api/vapi/lookup-order',
+  '/api/vapi/lookup-customer',
   verifyVapiSecret,
-  function (req, res) {
-    console.log('');
-    console.log('========================================');
-    console.log('LOOKUP ORDER REQUEST');
-    console.log('========================================');
-
-    console.log(
-      'Full request body:',
-      JSON.stringify(req.body, null, 2)
-    );
+  (req, res) => {
 
     const toolCall = getToolCall(req);
 
     if (!toolCall) {
-      console.log('ERROR: No tool call found.');
-
       return res.status(400).json({
         error: 'No tool call found'
       });
     }
 
-    console.log(
-      'Tool call:',
-      JSON.stringify(toolCall, null, 2)
-    );
-
     const args = getToolArguments(toolCall);
 
-    console.log(
-      'Parsed arguments:',
-      JSON.stringify(args, null, 2)
+    const phone = normalizePhone(
+      args.phone_number
     );
 
-    const orderNumber = String(
-      args.order_number || ''
-    ).trim();
-
-    console.log(
-      'ORDER NUMBER RECEIVED:',
-      JSON.stringify(orderNumber)
-    );
-
-    const order = MOCK_ORDERS[orderNumber];
+    const customer = getCustomerByPhone(phone);
 
     let resultText;
 
-    if (order) {
-      resultText =
-        'Order ' +
-        order.number +
-        ' is ' +
-        order.status +
-        ', arriving ' +
-        order.eta +
-        ', containing ' +
-        order.items +
-        '.';
+    if (!customer) {
 
-      console.log(
-        'ORDER FOUND:',
-        JSON.stringify(order, null, 2)
-      );
+      resultText =
+        'No Nova customer record was found for that phone number. Do not guess customer information.';
+
     } else {
-      resultText =
-        "I couldn't find an order with that number. Could you double check it?";
 
-      console.log(
-        'ORDER NOT FOUND:',
-        JSON.stringify(orderNumber)
-      );
+      resultText = JSON.stringify({
+        found: true,
+
+        customer_id:
+          customer.customer_id,
+
+        name:
+          customer.name,
+
+        phone:
+          customer.phone,
+
+        address:
+          customer.address,
+
+        customer_since:
+          customer.customer_since,
+
+        cable_status:
+          customer.cable.status,
+
+        cable_package:
+          customer.cable.package,
+
+        internet_status:
+          customer.internet.status,
+
+        internet_package:
+          customer.internet.package || null
+      });
     }
-
-    console.log(
-      'RESULT SENT TO VAPI:',
-      resultText
-    );
 
     return res.status(200).json(
       toolResponse(
@@ -333,22 +293,13 @@ app.post(
 );
 
 // ---------------------------------------------------------------------
-// TOOL 2: LOOKUP ACCOUNT
+// TOOL 2: LOOKUP BILL
 // ---------------------------------------------------------------------
 
 app.post(
-  '/api/vapi/lookup-account',
+  '/api/vapi/lookup-bill',
   verifyVapiSecret,
-  function (req, res) {
-    console.log('');
-    console.log('========================================');
-    console.log('LOOKUP ACCOUNT REQUEST');
-    console.log('========================================');
-
-    console.log(
-      'Full request body:',
-      JSON.stringify(req.body, null, 2)
-    );
+  (req, res) => {
 
     const toolCall = getToolCall(req);
 
@@ -360,37 +311,39 @@ app.post(
 
     const args = getToolArguments(toolCall);
 
-    console.log(
-      'Parsed account arguments:',
-      JSON.stringify(args, null, 2)
-    );
-
-    const phoneOrEmail = String(
-      args.phone_or_email || ''
-    ).trim();
-
-    const account = MOCK_ACCOUNTS[phoneOrEmail];
+    const customer =
+      getCustomerByPhone(
+        args.phone_number
+      );
 
     let resultText;
 
-    if (account) {
-      resultText =
-        'Found the account for ' +
-        account.name +
-        ', on the ' +
-        account.plan +
-        ' plan, status ' +
-        account.status +
-        '.';
-    } else {
-      resultText =
-        "I couldn't find an account with that phone number or email.";
-    }
+    if (!customer) {
 
-    console.log(
-      'ACCOUNT RESULT:',
-      resultText
-    );
+      resultText =
+        'No Nova customer record was found. Do not provide a bill amount.';
+
+    } else {
+
+      resultText = JSON.stringify({
+        found: true,
+
+        customer_id:
+          customer.customer_id,
+
+        name:
+          customer.name,
+
+        amount:
+          customer.current_bill.amount,
+
+        currency:
+          customer.current_bill.currency,
+
+        due_date:
+          customer.current_bill.due_date
+      });
+    }
 
     return res.status(200).json(
       toolResponse(
@@ -402,22 +355,13 @@ app.post(
 );
 
 // ---------------------------------------------------------------------
-// TOOL 3: CREATE SUPPORT TICKET
+// TOOL 3: CHECK SERVICE AVAILABILITY
 // ---------------------------------------------------------------------
 
 app.post(
-  '/api/vapi/create-ticket',
+  '/api/vapi/check-service-availability',
   verifyVapiSecret,
-  function (req, res) {
-    console.log('');
-    console.log('========================================');
-    console.log('CREATE SUPPORT TICKET REQUEST');
-    console.log('========================================');
-
-    console.log(
-      'Full request body:',
-      JSON.stringify(req.body, null, 2)
-    );
+  (req, res) => {
 
     const toolCall = getToolCall(req);
 
@@ -429,18 +373,393 @@ app.post(
 
     const args = getToolArguments(toolCall);
 
-    console.log(
-      'NEW TICKET:',
-      JSON.stringify(args, null, 2)
+    const address =
+      String(args.address || '').trim();
+
+    const service =
+      String(args.service || '')
+        .trim()
+        .toLowerCase();
+
+    const availability =
+      MOCK_SERVICE_AREA[address];
+
+    let resultText;
+
+    if (!availability) {
+
+      resultText =
+        'Service availability could not be confirmed for that address.';
+
+    } else if (service === 'internet') {
+
+      resultText = JSON.stringify({
+        address,
+        service: 'internet',
+        available:
+          availability.internet_available
+      });
+
+    } else if (service === 'cable') {
+
+      resultText = JSON.stringify({
+        address,
+        service: 'cable',
+        available:
+          availability.cable_available
+      });
+
+    } else {
+
+      resultText =
+        'The requested service type is not supported by this tool.';
+    }
+
+    return res.status(200).json(
+      toolResponse(
+        toolCall.id,
+        resultText
+      )
+    );
+  }
+);
+
+// ---------------------------------------------------------------------
+// TOOL 4: CREATE COMPLAINT
+// ---------------------------------------------------------------------
+
+app.post(
+  '/api/vapi/create-complaint',
+  verifyVapiSecret,
+  (req, res) => {
+
+    const toolCall = getToolCall(req);
+
+    if (!toolCall) {
+      return res.status(400).json({
+        error: 'No tool call found'
+      });
+    }
+
+    const args = getToolArguments(toolCall);
+
+    const phone =
+      normalizePhone(
+        args.phone_number
+      );
+
+    const customer =
+      getCustomerByPhone(phone);
+
+    if (!customer) {
+
+      return res.status(200).json(
+        toolResponse(
+          toolCall.id,
+
+          'The customer could not be verified. Do not create a complaint until the customer record is found.'
+        )
+      );
+    }
+
+    const complaintId =
+      'CMP-' +
+      String(
+        MOCK_COMPLAINTS.length + 10001
+      );
+
+    const complaint = {
+
+      complaint_id:
+        complaintId,
+
+      customer_id:
+        customer.customer_id,
+
+      subject:
+        String(
+          args.subject ||
+          'Customer complaint'
+        ),
+
+      description:
+        String(
+          args.description || ''
+        ),
+
+      status:
+        'open',
+
+      created_at:
+        new Date().toISOString()
+    };
+
+    MOCK_COMPLAINTS.push(
+      complaint
+    );
+
+    customer.complaints.push(
+      complaint
     );
 
     const resultText =
-      "Got it, I've logged a ticket about that and someone will follow up.";
+      JSON.stringify({
+        success: true,
+
+        complaint_id:
+          complaintId,
+
+        status:
+          'open'
+      });
 
     return res.status(200).json(
       toolResponse(
         toolCall.id,
         resultText
+      )
+    );
+  }
+);
+
+// ---------------------------------------------------------------------
+// TOOL 5: REQUEST NEW CONNECTION
+// ---------------------------------------------------------------------
+
+app.post(
+  '/api/vapi/request-new-connection',
+  verifyVapiSecret,
+  (req, res) => {
+
+    const toolCall =
+      getToolCall(req);
+
+    if (!toolCall) {
+      return res.status(400).json({
+        error: 'No tool call found'
+      });
+    }
+
+    const args =
+      getToolArguments(toolCall);
+
+    const phone =
+      normalizePhone(
+        args.phone_number
+      );
+
+    const customer =
+      getCustomerByPhone(phone);
+
+    if (!customer) {
+
+      return res.status(200).json(
+        toolResponse(
+          toolCall.id,
+
+          'The customer could not be verified. Do not submit a connection request.'
+        )
+      );
+    }
+
+    const address =
+      String(
+        args.address ||
+        customer.address
+      ).trim();
+
+    const service =
+      String(
+        args.service ||
+        'internet'
+      )
+        .trim()
+        .toLowerCase();
+
+    const availability =
+      MOCK_SERVICE_AREA[address];
+
+    if (!availability) {
+
+      return res.status(200).json(
+        toolResponse(
+          toolCall.id,
+
+          'Service availability could not be confirmed for this address. Do not promise a new connection.'
+        )
+      );
+    }
+
+    const available =
+      service === 'internet'
+        ? availability.internet_available
+        : service === 'cable'
+          ? availability.cable_available
+          : false;
+
+    if (!available) {
+
+      return res.status(200).json(
+        toolResponse(
+          toolCall.id,
+
+          `The requested ${service} service is not currently confirmed as available at this address.`
+        )
+      );
+    }
+
+    const requestId =
+      'REQ-' +
+      String(Date.now()).slice(-8);
+
+    return res.status(200).json(
+      toolResponse(
+        toolCall.id,
+
+        JSON.stringify({
+          success: true,
+
+          request_id:
+            requestId,
+
+          customer_id:
+            customer.customer_id,
+
+          service,
+
+          address,
+
+          status:
+            'request_created'
+        })
+      )
+    );
+  }
+);
+
+// ---------------------------------------------------------------------
+// TOOL 6: REQUEST DISCONNECTION
+// ---------------------------------------------------------------------
+
+app.post(
+  '/api/vapi/request-disconnection',
+  verifyVapiSecret,
+  (req, res) => {
+
+    const toolCall =
+      getToolCall(req);
+
+    if (!toolCall) {
+      return res.status(400).json({
+        error: 'No tool call found'
+      });
+    }
+
+    const args =
+      getToolArguments(toolCall);
+
+    const phone =
+      normalizePhone(
+        args.phone_number
+      );
+
+    const customer =
+      getCustomerByPhone(phone);
+
+    if (!customer) {
+
+      return res.status(200).json(
+        toolResponse(
+          toolCall.id,
+
+          'The customer could not be verified. Do not submit a disconnection request.'
+        )
+      );
+    }
+
+    const service =
+      String(
+        args.service || ''
+      )
+        .trim()
+        .toLowerCase();
+
+    if (
+      !['internet', 'cable']
+        .includes(service)
+    ) {
+
+      return res.status(200).json(
+        toolResponse(
+          toolCall.id,
+
+          'Please specify whether the customer wants to disconnect internet or cable.'
+        )
+      );
+    }
+
+    const requestId =
+      'DISC-' +
+      String(Date.now()).slice(-8);
+
+    return res.status(200).json(
+      toolResponse(
+        toolCall.id,
+
+        JSON.stringify({
+          success: true,
+
+          request_id:
+            requestId,
+
+          customer_id:
+            customer.customer_id,
+
+          service,
+
+          status:
+            'disconnection_request_created'
+        })
+      )
+    );
+  }
+);
+
+// ---------------------------------------------------------------------
+// TOOL 7: TRANSFER TO HUMAN
+// ---------------------------------------------------------------------
+
+app.post(
+  '/api/vapi/transfer-to-human',
+  verifyVapiSecret,
+  (req, res) => {
+
+    const toolCall =
+      getToolCall(req);
+
+    if (!toolCall) {
+      return res.status(400).json({
+        error: 'No tool call found'
+      });
+    }
+
+    const args =
+      getToolArguments(toolCall);
+
+    console.log(
+      'Human transfer requested:',
+      {
+        reason:
+          args.reason ||
+          'Not specified'
+      }
+    );
+
+    return res.status(200).json(
+      toolResponse(
+        toolCall.id,
+
+        'A human support representative should take over this call.'
       )
     );
   }
@@ -453,14 +772,16 @@ app.post(
 app.post(
   '/api/vapi/call-events',
   verifyVapiSecret,
-  function (req, res) {
+  (req, res) => {
+
     const event =
       req.body &&
       req.body.message;
 
     console.log(
       'CALL EVENT:',
-      event && event.type
+      event &&
+      event.type
     );
 
     return res.sendStatus(200);
@@ -471,9 +792,10 @@ app.post(
 // HEALTH CHECK
 // ---------------------------------------------------------------------
 
-app.get('/', function (req, res) {
+app.get('/', (req, res) => {
+
   res.send(
-    'Voice agent backend is running.'
+    'Nova Communications AI backend is running.'
   );
 });
 
@@ -481,9 +803,10 @@ app.get('/', function (req, res) {
 // START SERVER
 // ---------------------------------------------------------------------
 
-app.listen(PORT, function () {
+app.listen(PORT, () => {
+
   console.log(
-    'Voice agent backend listening on port ' +
+    'Nova AI backend listening on port ' +
     PORT
   );
 });
